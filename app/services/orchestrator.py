@@ -68,3 +68,24 @@ class ReliabilityOrchestrator:
                 messages += f"\n\nPREVIOUS ATTEMPT FAILED: {str(e)}. FIX THE JSON."
         
         return {"status": "failure", "error": "Max retries exceeded"}
+    
+# ... inside ReliabilityOrchestrator class ...
+
+    def health_check(self) -> dict:
+        """
+        Simple connectivity check to ensure API Key and Model are valid.
+        """
+        try:
+            # Send a minimal prompt to test connectivity
+            response = self.client.models.generate_content(
+                model=settings.GEMINI_MODEL,
+                contents="Ping",
+                config=types.GenerateContentConfig(
+                    max_output_tokens=5
+                )
+            )
+            return {"status": "healthy", "model": settings.GEMINI_MODEL}
+        except Exception as e:
+            # Return the exact error so we can debug the ClientError
+            print(f"🔥 Health Check Failed: {e}")
+            return {"status": "unhealthy", "error": str(e)}
