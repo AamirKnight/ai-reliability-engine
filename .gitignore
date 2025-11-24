@@ -1,1 +1,25 @@
+# --- Python & Runtime ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Virtual Environments ---
+# Common names for local virtualenvs
+venv/
+.venv/
+env/
+
+# --- Secrets (CRITICAL) ---
+# Never commit your environment variables or keys
 .env
+.env.prod
+.env.local
+
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+
+# --- Operating System ---
+.DS_Store
+Thumbs.db
