@@ -1,0 +1,20 @@
+# Exclude git history
+.git
+.gitignore
+
+# Exclude python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+
+# Exclude SECRETS (Critical!)
+.env
+.env.local
+
+# Exclude Tests & Docs (Optional for prod build)
+tests/
+docs/
