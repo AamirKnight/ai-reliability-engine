@@ -7,6 +7,13 @@ from collections import deque
 from datetime import datetime
 from typing import Optional
 from app.services.orchestrator import ReliabilityOrchestrator
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
+
+# 🟢 NEW IMPORTS for workflow support
+from app.services.workflow_engine import WorkflowEngine
+from app.workflows.loan_underwriting import LOAN_WORKFLOW
 
 
 # --- METRICS COLLECTOR ---
@@ -65,6 +72,7 @@ class MetricsCollector:
 # Initialize global instances
 orchestrator = ReliabilityOrchestrator()
 metrics = MetricsCollector()
+workflow_engine = WorkflowEngine()  # 🟢 NEW: Workflow engine instance
 
 
 # --- LIFESPAN (Startup/Shutdown Events) ---
@@ -102,6 +110,17 @@ class RequestBody(BaseModel):
     )
 
 
+# 🟢 NEW: Workflow request model
+class WorkflowRequest(BaseModel):
+    application_text: str = Field(..., description="The loan application text")
+    confidence_threshold: Optional[float] = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confidence required (0.0-1.0)"
+    )
+
+
 # --- API ENDPOINTS ---
 
 @app.get("/")
@@ -112,7 +131,9 @@ async def root():
         "endpoints": {
             "health": "/health - Check system health",
             "analyze": "/v1/analyze - Make a trading decision",
-            "metrics": "/v1/metrics - View performance statistics"
+            "workflow": "/v1/workflow/execute - Execute multi-step workflow",
+            "metrics": "/v1/metrics - View performance statistics",
+            "dashboard": "/dashboard - Visual metrics dashboard"
         },
         "docs": "/docs - Interactive API documentation"
     }
@@ -131,15 +152,62 @@ async def health_check():
 
 
 @app.post("/v1/analyze")
-# 🟢 Change: make the function async
 async def analyze(body: RequestBody):
     """
     Analyze a trading prompt with confidence-based quality gates.
     """
-    result = await orchestrator.run_reliable_workflow( # 🟢 Change: use await
+    result = await orchestrator.run_reliable_workflow(
         user_prompt=body.prompt,
         confidence_threshold=body.confidence_threshold
     )
+    
+    metrics.record(result)
+    return result
+
+
+# 🟢 NEW: Multi-step workflow endpoint
+@app.post("/v1/workflow/execute")
+async def execute_workflow(body: WorkflowRequest):
+    """
+    Execute the 5-step loan underwriting workflow.
+    
+    This demonstrates multi-step workflow orchestration with:
+    - Step dependencies
+    - Checkpoint/resume
+    - Confidence gating at each step
+    - Comprehensive error recovery
+    
+    Example body:
+    {
+        "application_text": "Name: Jane Doe, Income: $95000, Loan: $350000",
+        "confidence_threshold": 0.7
+    }
+    """
+    initial_context = {
+        "application_text": body.application_text
+    }
+    
+    result = await workflow_engine.execute_workflow(
+        workflow_def=LOAN_WORKFLOW,
+        initial_context=initial_context,
+        confidence_threshold=body.confidence_threshold
+    )
+    
+    return result
+
+
+# 🟢 NEW: Get workflow status endpoint
+@app.get("/v1/workflow/{execution_id}")
+async def get_workflow_status(execution_id: str):
+    """
+    Get the status of a workflow execution by ID.
+    """
+    execution = workflow_engine.get_execution(execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    
+    return execution
+
 
 @app.get("/v1/metrics")
 async def get_metrics():
@@ -163,3 +231,19 @@ async def reset_metrics():
     global metrics
     metrics = MetricsCollector()
     return {"message": "Metrics cleared successfully"}
+
+
+@app.get("/dashboard")
+async def dashboard():
+    """Serve the metrics dashboard"""
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    dashboard_path = os.path.join(static_dir, "dashboard.html")
+    if os.path.exists(dashboard_path):
+        return FileResponse(dashboard_path)
+    return {"error": "Dashboard not found"}
+
+
+# Mount static files LAST (after all routes are defined)
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
