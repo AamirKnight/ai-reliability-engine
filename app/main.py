@@ -1,6 +1,7 @@
 # app/main.py
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # 🟢 NEW: CORS import
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 from collections import deque
@@ -11,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-# 🟢 NEW IMPORTS for workflow support
+# 🟢 Workflow imports
 from app.services.workflow_engine import WorkflowEngine
 from app.workflows.loan_underwriting import LOAN_WORKFLOW
 
@@ -40,7 +41,6 @@ class MetricsCollector:
         total = len(self.decisions)
         successful = sum(1 for d in self.decisions if d.get("status") == "success")
         
-        # Calculate average confidence (only for successful decisions)
         successful_decisions = [d for d in self.decisions if d.get("status") == "success"]
         avg_confidence = 0.0
         if successful_decisions:
@@ -50,7 +50,6 @@ class MetricsCollector:
             ]
             avg_confidence = sum(confidences) / len(confidences)
         
-        # Calculate average response time
         response_times = [
             d.get("response_time_ms", 0) 
             for d in self.decisions 
@@ -65,17 +64,17 @@ class MetricsCollector:
             "average_confidence": f"{avg_confidence:.3f}",
             "average_response_time_ms": f"{avg_response_time:.1f}",
             "blocked_by_confidence_gate": total - successful,
-            "recent_decisions": list(self.decisions)[-10:]  # Last 10 for inspection
+            "recent_decisions": list(self.decisions)[-10:]
         }
 
 
 # Initialize global instances
 orchestrator = ReliabilityOrchestrator()
 metrics = MetricsCollector()
-workflow_engine = WorkflowEngine()  # 🟢 NEW: Workflow engine instance
+workflow_engine = WorkflowEngine()
 
 
-# --- LIFESPAN (Startup/Shutdown Events) ---
+# --- LIFESPAN ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup health check and graceful shutdown"""
@@ -85,7 +84,6 @@ async def lifespan(app: FastAPI):
         print(f"✅ AI System Online: Connected to {health['model']}")
     else:
         print(f"❌ CRITICAL: AI System Failure. Error: {health['error']}")
-        print("💡 TIP: Check your GEMINI_MODEL name in app/core/config.py")
     yield
     print("🛑 Shutting down gracefully...")
 
@@ -98,27 +96,29 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# 🟢 CORS MIDDLEWARE - CRITICAL for Next.js communication
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # Next.js dev server
+        "http://127.0.0.1:3000",  # Alternative localhost
+        "http://localhost:3001",  # Backup port
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
+
 
 # --- REQUEST MODELS ---
 class RequestBody(BaseModel):
     prompt: str = Field(..., description="The trading analysis prompt")
-    confidence_threshold: Optional[float] = Field(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Minimum confidence required (0.0-1.0). Lower = more permissive."
-    )
+    confidence_threshold: Optional[float] = Field(default=0.7, ge=0.0, le=1.0)
 
 
-# 🟢 NEW: Workflow request model
 class WorkflowRequest(BaseModel):
     application_text: str = Field(..., description="The loan application text")
-    confidence_threshold: Optional[float] = Field(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Minimum confidence required (0.0-1.0)"
-    )
+    confidence_threshold: Optional[float] = Field(default=0.7, ge=0.0, le=1.0)
 
 
 # --- API ENDPOINTS ---
@@ -128,23 +128,22 @@ async def root():
     """API documentation pointer"""
     return {
         "message": "Gemini Reliability Engine",
+        "version": "2.0.0",
+        "status": "online",
         "endpoints": {
-            "health": "/health - Check system health",
-            "analyze": "/v1/analyze - Make a trading decision",
-            "workflow": "/v1/workflow/execute - Execute multi-step workflow",
-            "metrics": "/v1/metrics - View performance statistics",
-            "dashboard": "/dashboard - Visual metrics dashboard"
+            "health": "/health",
+            "analyze": "/v1/analyze",
+            "workflow": "/v1/workflow/execute",
+            "metrics": "/v1/metrics",
+            "dashboard": "/dashboard"
         },
-        "docs": "/docs - Interactive API documentation"
+        "docs": "/docs"
     }
 
 
 @app.get("/health")
 async def health_check():
-    """
-    Verify the AI service is operational.
-    Returns 503 if unhealthy.
-    """
+    """Verify the AI service is operational"""
     result = orchestrator.health_check()
     if result["status"] == "unhealthy":
         raise HTTPException(status_code=503, detail=result)
@@ -153,9 +152,7 @@ async def health_check():
 
 @app.post("/v1/analyze")
 async def analyze(body: RequestBody):
-    """
-    Analyze a trading prompt with confidence-based quality gates.
-    """
+    """Single-step trading decision with reliability patterns"""
     result = await orchestrator.run_reliable_workflow(
         user_prompt=body.prompt,
         confidence_threshold=body.confidence_threshold
@@ -165,23 +162,16 @@ async def analyze(body: RequestBody):
     return result
 
 
-# 🟢 NEW: Multi-step workflow endpoint
 @app.post("/v1/workflow/execute")
 async def execute_workflow(body: WorkflowRequest):
     """
     Execute the 5-step loan underwriting workflow.
     
-    This demonstrates multi-step workflow orchestration with:
-    - Step dependencies
-    - Checkpoint/resume
-    - Confidence gating at each step
-    - Comprehensive error recovery
-    
-    Example body:
-    {
-        "application_text": "Name: Jane Doe, Income: $95000, Loan: $350000",
-        "confidence_threshold": 0.7
-    }
+    Returns a WorkflowExecution object with:
+    - execution_id: Unique workflow run identifier
+    - status: "running" | "completed" | "failed"
+    - step_executions: Dict of each step's result
+    - context: Shared data between steps
     """
     initial_context = {
         "application_text": body.application_text
@@ -196,12 +186,9 @@ async def execute_workflow(body: WorkflowRequest):
     return result
 
 
-# 🟢 NEW: Get workflow status endpoint
 @app.get("/v1/workflow/{execution_id}")
 async def get_workflow_status(execution_id: str):
-    """
-    Get the status of a workflow execution by ID.
-    """
+    """Get the status of a workflow execution by ID"""
     execution = workflow_engine.get_execution(execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found")
@@ -211,23 +198,13 @@ async def get_workflow_status(execution_id: str):
 
 @app.get("/v1/metrics")
 async def get_metrics():
-    """
-    View aggregated performance metrics.
-    
-    Shows:
-    - Success rate
-    - Average confidence scores
-    - Response times
-    - Recent decisions
-    """
+    """View aggregated performance metrics"""
     return metrics.get_stats()
 
 
 @app.post("/v1/metrics/reset")
 async def reset_metrics():
-    """
-    Clear all stored metrics (useful for testing).
-    """
+    """Clear all stored metrics"""
     global metrics
     metrics = MetricsCollector()
     return {"message": "Metrics cleared successfully"}
@@ -243,7 +220,7 @@ async def dashboard():
     return {"error": "Dashboard not found"}
 
 
-# Mount static files LAST (after all routes are defined)
+# Mount static files LAST
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
