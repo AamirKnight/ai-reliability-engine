@@ -131,38 +131,15 @@ async def health_check():
 
 
 @app.post("/v1/analyze")
+# 🟢 Change: make the function async
 async def analyze(body: RequestBody):
     """
     Analyze a trading prompt with confidence-based quality gates.
-    
-    Example request:
-    ```json
-    {
-        "prompt": "Should I buy AAPL stock?",
-        "confidence_threshold": 0.7
-    }
-    ```
     """
-    result = orchestrator.run_reliable_workflow(
+    result = await orchestrator.run_reliable_workflow( # 🟢 Change: use await
         user_prompt=body.prompt,
         confidence_threshold=body.confidence_threshold
     )
-    
-    # Record metrics for monitoring
-    metrics.record(result)
-    
-    # Return error if workflow failed
-    if result["status"] == "failure":
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": result["error"],
-                "message": "Decision workflow failed after retries"
-            }
-        )
-    
-    return result
-
 
 @app.get("/v1/metrics")
 async def get_metrics():
