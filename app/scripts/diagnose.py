@@ -16,40 +16,52 @@ async def run_diagnostics():
     
     orch = ReliabilityOrchestrator()
     report = {}
-
+    
     # 1. API KEY CHECK
-    if orch.client.api_key:
-        print("✅ [1/5] API Key Configured")
-        report["Config"] = "PASS"
-    else:
-        print("❌ [1/5] API Key Missing")
+    # We rely on the health check to indirectly test client initialization
+    try:
+        # Check if the client was initialized with a key
+        if orch.client.api_key:
+            print("✅ [1/5] API Key Configured")
+            report["Config"] = "PASS"
+        else:
+            print("❌ [1/5] API Key Missing (Client initialized without key)")
+            report["Config"] = "FAIL"
+    except Exception:
+        print("❌ [1/5] Client initialization failed.")
         report["Config"] = "FAIL"
 
-    # 2. CIRCUIT BREAKER STATE
-    if orch.cb.state == CircuitState.CLOSED:
+
+    # 2. CIRCUIT BREAKER & CONNECTIVITY
+    print("🔄 [2/5 & 3/5] Testing Connectivity & Circuit Breaker...")
+    # Health check is delegated to the AgentWrapper/CircuitBreaker
+    health = orch.health_check()
+    
+    # Check 2: Circuit Breaker State (Reported by health_check)
+    cb_state = health.get("circuit_state", "UNKNOWN")
+    if cb_state == CircuitState.CLOSED.value:
         print("✅ [2/5] Circuit Breaker Initialized (State: CLOSED)")
         report["CircuitBreaker"] = "PASS"
     else:
-        print(f"❌ [2/5] Circuit Breaker Invalid State: {orch.cb.state}")
+        print(f"❌ [2/5] Circuit Breaker Invalid State: {cb_state}")
         report["CircuitBreaker"] = "FAIL"
 
-    # 3. CONNECTIVITY (Sync Check)
-    print("🔄 [3/5] Testing Google Gemini Connectivity...")
-    health = orch.health_check()
+    # Check 3: Connectivity
     if health["status"] == "healthy":
-        print(f"✅ Connectivity OK ({health.get('model')})")
+        print(f"✅ [3/5] Google Gemini Connected ({health.get('model')})")
         report["Connectivity"] = "PASS"
     else:
-        print(f"❌ Connectivity Failed: {health.get('error')}")
+        print(f"❌ [3/5] Connectivity Failed: {health.get('error')}")
         report["Connectivity"] = "FAIL"
 
+
     # 4. PARALLEL EXECUTION & VOTING
-    print("\n🧠 [4/5] Testing Parallel Execution & Voting (Async)...")
+    print("\n🧠 [4/5] Testing Full Reliability Workflow (Async)...")
     print("   (This runs 3 simultaneous agents...)")
     try:
         start = time.time()
         result = await orch.run_reliable_workflow(
-            "Is now a good time to buy gold?", 
+            "Is now a good time to buy gold, considering recent inflation and geopolitical tension?", 
             confidence_threshold=0.5 # Low threshold to ensure pass for testing
         )
         duration = time.time() - start
@@ -70,14 +82,14 @@ async def run_diagnostics():
         report["Workflow"] = "CRITICAL FAIL"
 
     # 5. ERROR SIMULATION (Optional)
-    print("\n⚡ [5/5] Circuit Breaker Logic Check...")
+    print("\n⚡ [5/5] Circuit Breaker Logic Check (Manual Failure Trigger)...")
     # Manually trigger a failure
     orch.cb._on_failure()
     if orch.cb.failure_count == 1:
-        print("✅ Failure correctly counted")
+        print("✅ Failure correctly counted (Count: 1)")
         report["Logic"] = "PASS"
     else:
-        print("❌ Failure counting broken")
+        print(f"❌ Failure counting broken (Count: {orch.cb.failure_count})")
         report["Logic"] = "FAIL"
 
     print("\n" + "="*30)
