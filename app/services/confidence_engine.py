@@ -23,7 +23,8 @@ class ConfidenceEngine:
         response_time_ms: float
     ) -> ConfidenceMetrics:
         """
-        Multi-signal confidence scoring system
+        Multi-signal confidence scoring system.
+        Works with both TradeDecision and LoanStepDecision schemas.
         """
         
         # 1. Schema Validity (30% weight)
@@ -56,33 +57,49 @@ class ConfidenceEngine:
     
     def _check_semantic_coherence(self, decision: Dict[str, Any]) -> float:
         """
-        Check if the reasoning aligns with the action
+        Check if the reasoning aligns with the action/status.
+        Works with both TradeDecision (action) and LoanStepDecision (status).
         """
-        action = decision.get('action', '').upper()
+        # Try to get action (TradeDecision) or status (LoanStepDecision)
+        action_or_status = decision.get('action') or decision.get('status', '')
+        action_or_status = str(action_or_status).upper()
+        
         reasoning = decision.get('reasoning', '').lower()
         confidence = decision.get('confidence', 0)
         
         score = 1.0
         
-        # Rule 1: BUY should mention positive terms
-        if action == "BUY":
+        # For TradeDecision: BUY should mention positive terms
+        if action_or_status == "BUY":
             positive_terms = ['growth', 'strong', 'positive', 'upward', 'bullish']
             if not any(term in reasoning for term in positive_terms):
                 score -= 0.3
         
-        # Rule 2: SELL should mention negative terms
-        elif action == "SELL":
+        # For TradeDecision: SELL should mention negative terms
+        elif action_or_status == "SELL":
             negative_terms = ['decline', 'weak', 'negative', 'downward', 'bearish']
             if not any(term in reasoning for term in negative_terms):
                 score -= 0.3
         
-        # Rule 3: High confidence should have longer reasoning
+        # For LoanStepDecision: PASS should mention positive terms
+        elif action_or_status == "PASS":
+            positive_terms = ['approved', 'acceptable', 'sufficient', 'strong', 'good', 'healthy']
+            if not any(term in reasoning for term in positive_terms):
+                score -= 0.2
+        
+        # For LoanStepDecision: FAIL should mention concerns
+        elif action_or_status == "FAIL":
+            negative_terms = ['insufficient', 'high risk', 'concerns', 'unacceptable', 'rejected']
+            if not any(term in reasoning for term in negative_terms):
+                score -= 0.2
+        
+        # Rule: High confidence should have longer reasoning
         if confidence > 0.8 and len(reasoning) < 50:
             score -= 0.2
         
-        # Rule 4: Low confidence should express uncertainty
+        # Rule: Low confidence should express uncertainty
         if confidence < 0.5:
-            uncertain_terms = ['uncertain', 'unclear', 'mixed', 'volatile']
+            uncertain_terms = ['uncertain', 'unclear', 'mixed', 'volatile', 'review', 'borderline']
             if not any(term in reasoning for term in uncertain_terms):
                 score -= 0.2
         
@@ -90,17 +107,21 @@ class ConfidenceEngine:
     
     def _check_output_consistency(self, decision: Dict[str, Any]) -> float:
         """
-        Check for internal consistency in the decision
+        Check for internal consistency in the decision.
+        Works with both schemas.
         """
-        action = decision.get('action', '').upper()
+        # Get action or status
+        action_or_status = decision.get('action') or decision.get('status', '')
+        action_or_status = str(action_or_status).upper()
+        
         confidence = decision.get('confidence', 0)
         
-        # Strong actions should have high confidence
-        if action in ["BUY", "SELL"] and confidence < 0.5:
+        # Strong actions/passes should have high confidence
+        if action_or_status in ["BUY", "SELL", "PASS", "FAIL"] and confidence < 0.5:
             return 0.6  # Inconsistent
         
-        # HOLD can have any confidence
-        if action == "HOLD":
+        # HOLD/REVIEW can have any confidence
+        if action_or_status in ["HOLD", "REVIEW"]:
             return 0.9
         
         # Normal case
@@ -144,7 +165,7 @@ class ConfidenceEngine:
             return False, "Schema validation concerns"
         
         if confidence_metrics.semantic_coherence < 0.6:
-            return False, "Reasoning does not align with action"
+            return False, "Reasoning does not align with action/status"
         
         if confidence_metrics.historical_performance < 0.5:
             return False, "Agent has poor historical track record"

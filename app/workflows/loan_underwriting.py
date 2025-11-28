@@ -17,13 +17,14 @@ You are a document processing specialist analyzing a loan application.
 Application Details:
 {application_text}
 
-Extract and analyze the key information. Return your analysis in the required format.
+Extract and analyze the key information from this loan application.
 
 Return JSON with:
-- symbol: "LOAN_APP"
-- action: "EXTRACT"
+- step_type: "EXTRACT"
+- status: "PASS" (if extraction successful), "FAIL" (if data missing), or "REVIEW" (if unclear)
 - confidence: Your confidence in extraction accuracy (0-1)
-- reasoning: Concise summary including: applicant name, annual income, loan amount requested, and employment status
+- reasoning: Concise summary of what you found
+- key_findings: A summary including applicant name, annual income, loan amount requested, employment status, and existing debts
             """,
             depends_on=[],
             retry_count=3
@@ -41,10 +42,11 @@ Previous Analysis:
 Based on the extracted information, verify if the stated income is credible and sufficient for the loan request.
 
 Return JSON with:
-- symbol: "INCOME_CHECK"
-- action: "BUY" (if income is strong), "SELL" (if insufficient), or "HOLD" (if needs review)
+- step_type: "INCOME_CHECK"
+- status: "PASS" (if income is strong), "FAIL" (if insufficient), or "REVIEW" (if needs manual review)
 - confidence: Your confidence in the verification (0-1)
 - reasoning: Brief explanation of your income verification decision (2-3 sentences)
+- key_findings: State the verified income amount and your assessment
             """,
             depends_on=["step_1_extract"],
             retry_count=3
@@ -60,13 +62,14 @@ Context:
 - Application Data: {step_1_extract}
 - Income Verification: {step_2_income}
 
-Calculate and assess the debt-to-income ratio for this loan.
+Calculate and assess the debt-to-income (DTI) ratio for this loan. A DTI below 43% is generally acceptable.
 
 Return JSON with:
-- symbol: "DTI_RATIO"
-- action: "BUY" (if DTI is acceptable <43%), "SELL" (if high risk), or "HOLD" (if borderline)
+- step_type: "DTI"
+- status: "PASS" (if DTI is acceptable <43%), "FAIL" (if high risk >50%), or "REVIEW" (if borderline 43-50%)
 - confidence: Your confidence in the calculation (0-1)
-- reasoning: Brief DTI assessment explaining why the ratio is acceptable or concerning
+- reasoning: Brief DTI assessment explaining the calculated ratio and why it's acceptable or concerning
+- key_findings: State the calculated DTI percentage and your conclusion
             """,
             depends_on=["step_1_extract", "step_2_income"],
             retry_count=3
@@ -83,13 +86,14 @@ Complete Application Analysis:
 - Income Status: {step_2_income}
 - DTI Analysis: {step_3_dti}
 
-Assess the overall credit risk profile for this applicant.
+Assess the overall credit risk profile for this applicant based on all available information.
 
 Return JSON with:
-- symbol: "CREDIT_RISK"
-- action: "BUY" (low risk), "HOLD" (medium risk), or "SELL" (high risk)
+- step_type: "CREDIT_RISK"
+- status: "PASS" (low risk), "REVIEW" (medium risk), or "FAIL" (high risk)
 - confidence: Your confidence in the risk assessment (0-1)
-- reasoning: Brief explanation of the key credit risk factors
+- reasoning: Brief explanation of the key credit risk factors (2-3 sentences)
+- key_findings: Overall risk level and primary concerns or strengths
             """,
             depends_on=["step_1_extract", "step_2_income", "step_3_dti"],
             retry_count=3
@@ -99,7 +103,7 @@ Return JSON with:
             step_id="step_5_decision",
             name="Generate Final Loan Decision",
             prompt_template="""
-You are the final loan decision authority.
+You are the final loan decision authority making the ultimate approval decision.
 
 Complete Analysis Review:
 1. Application: {step_1_extract}
@@ -107,13 +111,17 @@ Complete Analysis Review:
 3. DTI: {step_3_dti}
 4. Credit Risk: {step_4_credit}
 
-Make the final loan decision based on all previous analyses.
+Make the final loan decision based on all previous analyses. Consider:
+- If all previous steps passed, the loan should be APPROVED
+- If any critical step failed, the loan should be REJECTED
+- If there are concerns but not dealbreakers, it needs MANUAL REVIEW
 
 Return JSON with:
-- symbol: "FINAL_DECISION"
-- action: "BUY" (APPROVE loan), "SELL" (REJECT loan), or "HOLD" (needs manual review)
+- step_type: "FINAL"
+- status: "PASS" (APPROVE loan), "FAIL" (REJECT loan), or "REVIEW" (needs manual review)
 - confidence: Your confidence in the final decision (0-1)
-- reasoning: Comprehensive explanation of the final decision citing key factors from all analyses
+- reasoning: Comprehensive explanation of the final decision citing key factors from all analyses (3-4 sentences)
+- key_findings: Final recommendation with brief justification
             """,
             depends_on=["step_1_extract", "step_2_income", "step_3_dti", "step_4_credit"],
             retry_count=2

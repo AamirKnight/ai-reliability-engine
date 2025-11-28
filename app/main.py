@@ -1,7 +1,7 @@
-# app/main.py
+# app/main.py (FREE TIER OPTIMIZED)
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # 🟢 NEW: CORS import
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 from collections import deque
@@ -12,14 +12,16 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-# 🟢 Workflow imports
+# Workflow imports
 from app.services.workflow_engine import WorkflowEngine
 from app.workflows.loan_underwriting import LOAN_WORKFLOW
+from app.services.workflow_aggregator import WorkflowResultAggregator
+from app.schemas.loan_decision import FinalLoanDecision
 
 
 # --- METRICS COLLECTOR ---
 class MetricsCollector:
-    """In-memory metrics storage (replace with Redis/DB in production)"""
+    """In-memory metrics storage"""
     def __init__(self, max_size=1000):
         self.decisions = deque(maxlen=max_size)
     
@@ -69,9 +71,11 @@ class MetricsCollector:
 
 
 # Initialize global instances
-orchestrator = ReliabilityOrchestrator()
+# 🟢 NEW: use_parallel=False for free tier (change to True for paid tier)
+orchestrator = ReliabilityOrchestrator(use_parallel=False)
 metrics = MetricsCollector()
 workflow_engine = WorkflowEngine()
+workflow_aggregator = WorkflowResultAggregator()
 
 
 # --- LIFESPAN ---
@@ -82,6 +86,7 @@ async def lifespan(app: FastAPI):
     health = orchestrator.health_check()
     if health["status"] == "healthy":
         print(f"✅ AI System Online: Connected to {health['model']}")
+        print(f"📊 Rate Limit: {health.get('rate_limit', {})}")
     else:
         print(f"❌ CRITICAL: AI System Failure. Error: {health['error']}")
     yield
@@ -92,21 +97,21 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Gemini Reliability Engine",
     description="Production-grade AI workflow with confidence scoring and metrics",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan
 )
 
-# 🟢 CORS MIDDLEWARE - CRITICAL for Next.js communication
+# CORS MIDDLEWARE
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",  # Next.js dev server
-        "http://127.0.0.1:3000",  # Alternative localhost
-        "http://localhost:3001",  # Backup port
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
     ],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -127,9 +132,10 @@ class WorkflowRequest(BaseModel):
 async def root():
     """API documentation pointer"""
     return {
-        "message": "Gemini Reliability Engine",
-        "version": "2.0.0",
+        "message": "Gemini Reliability Engine (Free Tier Optimized)",
+        "version": "2.1.0",
         "status": "online",
+        "execution_mode": "sequential (free tier friendly)",
         "endpoints": {
             "health": "/health",
             "analyze": "/v1/analyze",
@@ -162,38 +168,42 @@ async def analyze(body: RequestBody):
     return result
 
 
-@app.post("/v1/workflow/execute")
+@app.post("/v1/workflow/execute", response_model=FinalLoanDecision)
 async def execute_workflow(body: WorkflowRequest):
     """
     Execute the 5-step loan underwriting workflow.
-    
-    Returns a WorkflowExecution object with:
-    - execution_id: Unique workflow run identifier
-    - status: "running" | "completed" | "failed"
-    - step_executions: Dict of each step's result
-    - context: Shared data between steps
+    Optimized for free tier with sequential execution.
     """
     initial_context = {
         "application_text": body.application_text
     }
     
-    result = await workflow_engine.execute_workflow(
+    # Execute the workflow
+    execution = await workflow_engine.execute_workflow(
         workflow_def=LOAN_WORKFLOW,
         initial_context=initial_context,
         confidence_threshold=body.confidence_threshold
     )
     
-    return result
+    # Generate human-readable final decision
+    final_decision = workflow_aggregator.generate_loan_decision_summary(execution)
+    
+    return final_decision
 
 
 @app.get("/v1/workflow/{execution_id}")
 async def get_workflow_status(execution_id: str):
-    """Get the status of a workflow execution by ID"""
+    """Get the detailed status of a workflow execution by ID"""
     execution = workflow_engine.get_execution(execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found")
     
-    return execution
+    final_decision = workflow_aggregator.generate_loan_decision_summary(execution)
+    
+    return {
+        "execution": execution,
+        "final_decision": final_decision
+    }
 
 
 @app.get("/v1/metrics")

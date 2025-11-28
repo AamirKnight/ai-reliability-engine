@@ -1,38 +1,70 @@
+# app/services/orchestrator.py (FREE TIER OPTIMIZED)
+
 from google import genai
 from google.genai import types
 import asyncio
 import time
+from typing import Optional, Type
+from pydantic import BaseModel
 from app.core.config import settings
 from app.schemas.decision import TradeDecision
 from app.services.confidence_engine import ConfidenceEngine
-from app.services.parallel_executor import ParallelExecutor
 from app.services.circuit_breaker import CircuitBreaker
-# 🟢 NEW IMPORT
-from app.services.agent_wrapper import AgentWrapper 
-# 🔴 REMOVED: tenacity imports (as we use our CB now)
+from app.services.agent_wrapper import AgentWrapper
+from app.services.rate_limiter import RateLimiter
+from app.services.sequential_executor import SequentialExecutor  # NEW
+
 
 class ReliabilityOrchestrator:
-    def __init__(self):
-        # 1. Initialize Core Components (Lowest level first)
-        # We still need the client for the health check/initial config check
+    def __init__(self, use_parallel: bool = False):
+        """
+        Args:
+            use_parallel: If True, use parallel execution (needs paid tier).
+                         If False, use sequential execution (free tier friendly).
+        """
+        # 1. Initialize Core Components
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY) 
         self.confidence_engine = ConfidenceEngine()
         self.cb = CircuitBreaker(failure_threshold=3, recovery_timeout=45)
         
-        # 2. Inject CB into Agent Wrapper (the client layer)
-        self.agent_wrapper = AgentWrapper(circuit_breaker=self.cb)
-        
-        # 3. Inject Agent Wrapper into Parallel Executor (the execution layer)
-        self.parallel_executor = ParallelExecutor(
-            num_instances=3, 
-            agent_wrapper=self.agent_wrapper
+        # 2. Initialize rate limiter for free tier
+        self.rate_limiter = RateLimiter(
+            max_requests=8,  # Conservative limit for free tier
+            window_seconds=60
         )
+        
+        # 3. Inject dependencies into Agent Wrapper
+        self.agent_wrapper = AgentWrapper(
+            circuit_breaker=self.cb,
+            rate_limiter=self.rate_limiter
+        )
+        
+        # 4. Choose execution strategy based on tier
+        self.use_parallel = use_parallel
+        
+        if use_parallel:
+            # Parallel execution (requires paid tier)
+            from app.services.parallel_executor import ParallelExecutor
+            self.executor = ParallelExecutor(
+                num_instances=3, 
+                agent_wrapper=self.agent_wrapper
+            )
+        else:
+            # Sequential execution (free tier friendly)
+            self.executor = SequentialExecutor(
+                agent_wrapper=self.agent_wrapper
+            )
 
-    async def run_reliable_workflow(self, user_prompt: str, confidence_threshold: float = 0.7) -> dict:
+    async def run_reliable_workflow(
+        self, 
+        user_prompt: str, 
+        confidence_threshold: float = 0.7,
+        response_schema: Optional[Type[BaseModel]] = None
+    ) -> dict:
         """
-        Executes the full reliability pipeline:
-        Parallel Agents -> Voting -> Confidence Gate -> Retry Loop
+        Executes the reliability pipeline with adaptive retry logic.
         """
+        schema = response_schema or TradeDecision
         
         base_prompt = f"""
         You are a senior trading analyst. 
@@ -48,8 +80,19 @@ class ReliabilityOrchestrator:
                 print(f"\n🔄 WORKFLOW START: Attempt {attempt+1}")
                 start_time = time.time()
                 
-                # STEP 1: Parallel Execution (Implicitly uses AgentWrapper/CircuitBreaker)
-                final_decision, all_decisions = await self.parallel_executor.run_parallel_execution(current_prompt)
+                # STEP 1: Execute (parallel or sequential based on tier)
+                if self.use_parallel:
+                    final_decision, all_decisions = await self.executor.run_parallel_execution(
+                        current_prompt,
+                        response_schema=schema
+                    )
+                    num_agents = len(all_decisions)
+                else:
+                    final_decision = await self.executor.run_single_execution(
+                        current_prompt,
+                        response_schema=schema
+                    )
+                    num_agents = 1
                 
                 response_time_ms = (time.time() - start_time) * 1000
                 
@@ -77,20 +120,19 @@ class ReliabilityOrchestrator:
                         "confidence_metrics": confidence_metrics.model_dump(),
                         "meta": {
                             "attempts": attempt + 1,
-                            "parallel_agents": len(all_decisions),
-                            "response_time_ms": response_time_ms
+                            "parallel_agents": num_agents,
+                            "response_time_ms": response_time_ms,
+                            "execution_mode": "parallel" if self.use_parallel else "sequential"
                         }
                     }
                 else:
                     print(f"⛔ GATE BLOCKED: {reason}")
-                    # Adaptive Prompting for next retry
                     current_prompt += f"\n\nCRITICAL FEEDBACK: Your previous analysis was rejected because: {reason}. You must be more specific and confident."
                     continue
 
             except Exception as e:
                 print(f"⚠️ Attempt {attempt+1} Failed: {str(e)}")
                 self.confidence_engine.record_outcome(success=False)
-                # Ensure we add the error to the prompt for the next attempt
                 current_prompt += f"\n\nSYSTEM ERROR: The previous attempt crashed. Please ensure you output valid JSON or resolve the execution error."
                 
         self.confidence_engine.record_outcome(success=False)
@@ -99,6 +141,6 @@ class ReliabilityOrchestrator:
             "error": "Workflow failed after maximum retries or circuit breaker open."
         }
 
-    # The Orchestrator's health check is now delegated to the AgentWrapper
     def health_check(self) -> dict:
+        """Health check with rate limit info"""
         return self.agent_wrapper.health_check()

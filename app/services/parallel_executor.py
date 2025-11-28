@@ -1,10 +1,12 @@
+# app/services/parallel_executor.py
+
 import asyncio
-from typing import List, Tuple, Optional, Any
+from typing import List, Tuple, Optional, Any, Type
 from collections import Counter
+from pydantic import BaseModel
 from app.schemas.decision import TradeDecision
-# 🟢 NEW IMPORT: Now imports the AgentWrapper
-from app.services.agent_wrapper import AgentWrapper 
-# 🔴 FIX: Removed circular import: from app.services.orchestrator import ReliabilityOrchestrator # To call the model
+from app.services.agent_wrapper import AgentWrapper
+
 
 class ParallelExecutor:
     """
@@ -14,7 +16,6 @@ class ParallelExecutor:
     """
     def __init__(self, num_instances: int = 3, agent_wrapper: Optional[AgentWrapper] = None):
         self.num_instances = num_instances
-        # 🟢 FIX: Dependency Injection is required here.
         if not agent_wrapper:
             raise ValueError("AgentWrapper must be injected into ParallelExecutor.")
         self.agent_wrapper = agent_wrapper
@@ -35,37 +36,65 @@ class ParallelExecutor:
         
         return variations[:self.num_instances]
 
-    def _sync_call_model(self, prompt: str) -> Optional[TradeDecision]:
+    def _sync_call_model(
+        self, 
+        prompt: str, 
+        response_schema: Optional[Type[BaseModel]] = None
+    ) -> Optional[BaseModel]:
         """
         The actual blocking I/O call to Gemini via the AgentWrapper.
+        
+        Args:
+            prompt: The prompt to send
+            response_schema: Pydantic model class for validation (defaults to TradeDecision)
+        
+        Returns:
+            Validated Pydantic model instance or None on failure
         """
         try:
-            # 🟢 FIX: Use the injected AgentWrapper to execute the API call
-            # The AgentWrapper already handles the Circuit Breaker and JSON schema
-            raw_text = self.agent_wrapper.execute(prompt)
+            # Default to TradeDecision if no schema provided (for backward compatibility)
+            schema = response_schema or TradeDecision
+            
+            # Pass the schema to the agent wrapper
+            raw_text = self.agent_wrapper.execute(prompt, response_schema=schema)
             
             # Schema validate immediately after receiving response
-            decision = TradeDecision.model_validate_json(raw_text)
-            return decision
+            validated_model = schema.model_validate_json(raw_text)
+            return validated_model
+            
         except Exception as e:
             # Note the failure, but return None so the other parallel runs can continue
             print(f"⚠️ Single Agent Instance Failed: {type(e).__name__} - {str(e)}")
             return None
 
-    async def _execute_single_run(self, prompt: str) -> Optional[TradeDecision]:
+    async def _execute_single_run(
+        self, 
+        prompt: str,
+        response_schema: Optional[Type[BaseModel]] = None
+    ) -> Optional[BaseModel]:
         """
         Async wrapper for the sync model call, running it in a thread.
         """
-        return await asyncio.to_thread(self._sync_call_model, prompt)
+        return await asyncio.to_thread(self._sync_call_model, prompt, response_schema)
 
-    def _majority_vote(self, decisions: List[TradeDecision]) -> Tuple[TradeDecision, List[TradeDecision]]:
+    def _majority_vote(
+        self, 
+        decisions: List[BaseModel]
+    ) -> Tuple[BaseModel, List[BaseModel]]:
         """
         Voting Logic: Majority Action -> Highest Confidence Breakpoint.
+        
+        Works with any Pydantic model that has 'action' and 'confidence' fields.
         """
         if not decisions:
             raise ValueError("No successful decisions to vote on.")
+        
+        # Check if decisions have the required fields
+        if not hasattr(decisions[0], 'action') or not hasattr(decisions[0], 'confidence'):
+            # If no voting fields, just return the first one
+            return decisions[0], decisions
             
-        # Count votes for BUY, SELL, HOLD
+        # Count votes for actions (BUY, SELL, HOLD, etc.)
         action_votes = Counter(d.action for d in decisions)
         
         # Find the most common action(s)
@@ -79,20 +108,33 @@ class ParallelExecutor:
         
         return final_decision, decisions
 
-    async def run_parallel_execution(self, prompt: str) -> Tuple[TradeDecision, List[TradeDecision]]:
+    async def run_parallel_execution(
+        self, 
+        prompt: str,
+        response_schema: Optional[Type[BaseModel]] = None
+    ) -> Tuple[BaseModel, List[BaseModel]]:
         """
         Main entry point for parallel execution.
+        
+        Args:
+            prompt: The prompt to execute
+            response_schema: Optional Pydantic model for response validation
+        
+        Returns:
+            Tuple of (final_decision, all_decisions)
         """
         prompts = self._generate_prompt_variations(prompt)
         
-        # Launch all tasks
-        tasks = [self._execute_single_run(p) for p in prompts]
+        # Launch all tasks with the schema
+        tasks = [self._execute_single_run(p, response_schema) for p in prompts]
         results = await asyncio.gather(*tasks)
         
         # Filter failures
         successful = [r for r in results if r is not None]
         
         if len(successful) < (self.num_instances // 2) + 1:
-            raise RuntimeError(f"Consensus Failed: Only {len(successful)}/{self.num_instances} agents survived.")
+            raise RuntimeError(
+                f"Consensus Failed: Only {len(successful)}/{self.num_instances} agents survived."
+            )
 
         return self._majority_vote(successful)

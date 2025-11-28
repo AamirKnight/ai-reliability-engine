@@ -1,3 +1,5 @@
+# app/services/workflow_engine.py
+
 import uuid
 import asyncio
 from datetime import datetime
@@ -9,6 +11,8 @@ from app.schemas.workflow import (
     StepStatus
 )
 from app.services.orchestrator import ReliabilityOrchestrator
+from app.schemas.loan_decision import LoanStepDecision  # NEW
+
 
 class WorkflowEngine:
     def __init__(self):
@@ -93,6 +97,7 @@ class WorkflowEngine:
     ) -> StepExecution:
         """
         Execute a single step with retry logic.
+        Uses LoanStepDecision schema for loan workflows.
         """
         step_exec = StepExecution(
             step_id=step_def.step_id,
@@ -113,10 +118,11 @@ class WorkflowEngine:
                 
                 print(f"   Attempt {attempt + 1}/{step_def.retry_count}...")
                 
-                # Use existing reliability orchestrator
+                # Use LoanStepDecision schema for loan workflow steps
                 result = await self.orchestrator.run_reliable_workflow(
                     user_prompt=prompt,
-                    confidence_threshold=confidence_threshold
+                    confidence_threshold=confidence_threshold,
+                    response_schema=LoanStepDecision  # NEW: Use proper schema
                 )
                 
                 if result["status"] == "success":
@@ -134,9 +140,9 @@ class WorkflowEngine:
                 print(f"   ❌ Attempt {attempt + 1} crashed: {str(e)}")
                 step_exec.error = str(e)
             
-            # Wait before retry
+            # Wait before retry (exponential backoff)
             if attempt < step_def.retry_count - 1:
-                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                await asyncio.sleep(2 ** attempt)
         
         # All retries exhausted
         step_exec.status = StepStatus.FAILED
