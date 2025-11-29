@@ -86,13 +86,6 @@ class SemanticCache:
     def get(self, prompt: str, workflow_context: Optional[Dict] = None) -> Optional[Dict]:
         """
         Retrieve cached result for semantically similar prompt.
-        
-        Args:
-            prompt: The current prompt to check
-            workflow_context: Optional workflow context for more precise matching
-        
-        Returns:
-            Dict with cached result if found, None otherwise
         """
         self.stats["total_queries"] += 1
         
@@ -118,6 +111,11 @@ class SemanticCache:
                 best_similarity = similarity
                 best_match = entry
         
+        # --- 👇 NEW DEBUGGING LOGIC STARTS HERE 👇 ---
+        if best_match:
+            # This prints EVERY check so you can see the score
+            print(f"🔎 Cache Check: Score {best_similarity:.3f} | Threshold {self.similarity_threshold}")
+
         # Check if similarity exceeds threshold
         if best_match and best_similarity >= self.similarity_threshold:
             # Cache hit!
@@ -126,8 +124,6 @@ class SemanticCache:
             
             self.stats["cache_hits"] += 1
             self.stats["api_calls_saved"] += 1
-            
-            # Estimate time saved (typical API call is 2-3 seconds)
             self.stats["total_time_saved_seconds"] += 2.5
             
             return {
@@ -140,6 +136,13 @@ class SemanticCache:
                 "time_saved_seconds": 2.5
             }
         
+        # If we found a match but it was too low, tell us why
+        if best_match and best_similarity > 0.5:
+             print(f"⚠️ NEAR MISS: Score {best_similarity:.3f} was below threshold {self.similarity_threshold}")
+             print(f"   Query: {prompt}")
+             print(f"   Match: {best_match.prompt}")
+        # --- 👆 NEW DEBUGGING LOGIC ENDS HERE 👆 ---
+
         # Cache miss
         self.stats["cache_misses"] += 1
         return None

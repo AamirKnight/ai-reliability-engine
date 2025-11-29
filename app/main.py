@@ -81,7 +81,7 @@ class MetricsCollector:
 # ============================================================================
 print("🔄 Initializing shared semantic cache...")
 shared_semantic_cache = SemanticCache(
-    similarity_threshold=0.80,  # Tuned for optimal hit rate
+    similarity_threshold=0.70,  # Tuned for optimal hit rate
     max_cache_size=1000,
     ttl_hours=24
 )
