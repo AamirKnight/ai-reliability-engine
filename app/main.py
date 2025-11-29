@@ -1,4 +1,4 @@
-# app/main.py (FREE TIER OPTIMIZED)
+# app/main.py (FIXED - SHARED CACHE INSTANCE)
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +8,7 @@ from collections import deque
 from datetime import datetime
 from typing import Optional
 from app.services.orchestrator import ReliabilityOrchestrator
+from app.services.semantic_cache import SemanticCache, CachedOrchestrator
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
@@ -43,6 +44,10 @@ class MetricsCollector:
         total = len(self.decisions)
         successful = sum(1 for d in self.decisions if d.get("status") == "success")
         
+        # Count cache hits
+        cache_hits = sum(1 for d in self.decisions 
+                        if d.get("meta", {}).get("cache_hit") == True)
+        
         successful_decisions = [d for d in self.decisions if d.get("status") == "success"]
         avg_confidence = 0.0
         if successful_decisions:
@@ -63,6 +68,7 @@ class MetricsCollector:
             "total_decisions": total,
             "successful_decisions": successful,
             "success_rate": f"{(successful/total)*100:.1f}%",
+            "cache_hit_rate": f"{(cache_hits/total)*100:.1f}%",
             "average_confidence": f"{avg_confidence:.3f}",
             "average_response_time_ms": f"{avg_response_time:.1f}",
             "blocked_by_confidence_gate": total - successful,
@@ -70,11 +76,25 @@ class MetricsCollector:
         }
 
 
-# Initialize global instances
-# 🟢 NEW: use_parallel=False for free tier (change to True for paid tier)
-orchestrator = ReliabilityOrchestrator(use_parallel=False)
+# ============================================================================
+# CRITICAL: Initialize SINGLE shared cache instance
+# ============================================================================
+print("🔄 Initializing shared semantic cache...")
+shared_semantic_cache = SemanticCache(
+    similarity_threshold=0.80,  # Tuned for optimal hit rate
+    max_cache_size=1000,
+    ttl_hours=24
+)
+
+# Initialize orchestrator with shared cache
+base_orchestrator = ReliabilityOrchestrator(use_parallel=False)
+orchestrator = CachedOrchestrator(base_orchestrator, shared_semantic_cache)
+
+# Initialize metrics
 metrics = MetricsCollector()
-workflow_engine = WorkflowEngine()
+
+# Initialize workflow engine with the SAME shared cache
+workflow_engine = WorkflowEngine(cache=shared_semantic_cache)
 workflow_aggregator = WorkflowResultAggregator()
 
 
@@ -87,17 +107,20 @@ async def lifespan(app: FastAPI):
     if health["status"] == "healthy":
         print(f"✅ AI System Online: Connected to {health['model']}")
         print(f"📊 Rate Limit: {health.get('rate_limit', {})}")
+        print(f"🧠 Semantic Cache: Initialized with {shared_semantic_cache.max_cache_size} max entries")
+        print(f"   Similarity Threshold: {shared_semantic_cache.similarity_threshold}")
     else:
         print(f"❌ CRITICAL: AI System Failure. Error: {health['error']}")
     yield
     print("🛑 Shutting down gracefully...")
+    print(f"📊 Final Cache Stats: {shared_semantic_cache.get_stats()}")
 
 
 # --- FASTAPI APP ---
 app = FastAPI(
-    title="Gemini Reliability Engine",
-    description="Production-grade AI workflow with confidence scoring and metrics",
-    version="2.1.0",
+    title="Gemini Reliability Engine with Semantic Cache",
+    description="Production-grade AI workflow with confidence scoring, semantic caching, and metrics",
+    version="2.2.0",
     lifespan=lifespan
 )
 
@@ -119,6 +142,7 @@ app.add_middleware(
 class RequestBody(BaseModel):
     prompt: str = Field(..., description="The trading analysis prompt")
     confidence_threshold: Optional[float] = Field(default=0.7, ge=0.0, le=1.0)
+    use_cache: Optional[bool] = Field(default=True, description="Whether to use semantic cache")
 
 
 class WorkflowRequest(BaseModel):
@@ -131,16 +155,29 @@ class WorkflowRequest(BaseModel):
 @app.get("/")
 async def root():
     """API documentation pointer"""
+    cache_stats = orchestrator.get_cache_stats()
     return {
-        "message": "Gemini Reliability Engine (Free Tier Optimized)",
-        "version": "2.1.0",
+        "message": "Gemini Reliability Engine with Semantic Cache",
+        "version": "2.2.0",
         "status": "online",
-        "execution_mode": "sequential (free tier friendly)",
+        "features": {
+            "semantic_caching": True,
+            "confidence_scoring": True,
+            "circuit_breaker": True,
+            "rate_limiting": True,
+            "workflow_engine": True
+        },
+        "cache_stats": {
+            "hit_rate": cache_stats["hit_rate"],
+            "api_calls_saved": cache_stats["api_calls_saved"],
+            "time_saved": cache_stats["time_saved_seconds"]
+        },
         "endpoints": {
             "health": "/health",
             "analyze": "/v1/analyze",
             "workflow": "/v1/workflow/execute",
             "metrics": "/v1/metrics",
+            "cache_stats": "/v1/cache/stats",
             "dashboard": "/dashboard"
         },
         "docs": "/docs"
@@ -153,15 +190,19 @@ async def health_check():
     result = orchestrator.health_check()
     if result["status"] == "unhealthy":
         raise HTTPException(status_code=503, detail=result)
+    
+    # Add cache info to health check
+    result["cache"] = orchestrator.get_cache_stats()
     return result
 
 
 @app.post("/v1/analyze")
 async def analyze(body: RequestBody):
-    """Single-step trading decision with reliability patterns"""
+    """Single-step trading decision with reliability patterns and semantic caching"""
     result = await orchestrator.run_reliable_workflow(
         user_prompt=body.prompt,
-        confidence_threshold=body.confidence_threshold
+        confidence_threshold=body.confidence_threshold,
+        use_cache=body.use_cache
     )
     
     metrics.record(result)
@@ -172,7 +213,7 @@ async def analyze(body: RequestBody):
 async def execute_workflow(body: WorkflowRequest):
     """
     Execute the 5-step loan underwriting workflow.
-    Optimized for free tier with sequential execution.
+    Optimized for free tier with sequential execution and semantic caching.
     """
     initial_context = {
         "application_text": body.application_text
@@ -218,6 +259,44 @@ async def reset_metrics():
     global metrics
     metrics = MetricsCollector()
     return {"message": "Metrics cleared successfully"}
+
+
+# --- SEMANTIC CACHE ENDPOINTS ---
+
+@app.get("/v1/cache/stats")
+async def get_cache_stats():
+    """View semantic cache performance metrics"""
+    return orchestrator.get_cache_stats()
+
+
+@app.get("/v1/cache/top")
+async def get_top_cached():
+    """View most frequently accessed cached prompts"""
+    return {
+        "top_prompts": orchestrator.cache.get_top_cached_prompts(limit=10)
+    }
+
+
+@app.post("/v1/cache/clear")
+async def clear_cache():
+    """Clear the entire cache"""
+    orchestrator.cache.invalidate()
+    return {"message": "Cache cleared successfully"}
+
+
+@app.post("/v1/cache/invalidate")
+async def invalidate_similar(prompt: str):
+    """Invalidate cache entries similar to the provided prompt"""
+    orchestrator.cache.invalidate(prompt)
+    return {"message": f"Invalidated cache entries similar to: {prompt[:100]}..."}
+
+
+@app.post("/v1/cache/export")
+async def export_cache():
+    """Export cache to file for persistence"""
+    filepath = "cache_backup.json"
+    orchestrator.cache.export_cache(filepath)
+    return {"message": f"Cache exported to {filepath}"}
 
 
 @app.get("/dashboard")

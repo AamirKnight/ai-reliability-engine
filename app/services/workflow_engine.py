@@ -1,4 +1,4 @@
-# app/services/workflow_engine.py
+# app/services/workflow_engine.py (FIXED - ACCEPTS SHARED CACHE)
 
 import uuid
 import asyncio
@@ -11,12 +11,35 @@ from app.schemas.workflow import (
     StepStatus
 )
 from app.services.orchestrator import ReliabilityOrchestrator
-from app.schemas.loan_decision import LoanStepDecision  # NEW
+from app.services.semantic_cache import SemanticCache, CachedOrchestrator
+from app.schemas.loan_decision import LoanStepDecision
 
 
 class WorkflowEngine:
-    def __init__(self):
-        self.orchestrator = ReliabilityOrchestrator()
+    def __init__(self, cache: Optional[SemanticCache] = None):
+        """
+        Initialize workflow engine with optional shared cache.
+        
+        Args:
+            cache: Shared SemanticCache instance from main.py
+                  If None, creates its own cache (not recommended)
+        """
+        base_orchestrator = ReliabilityOrchestrator()
+        
+        if cache:
+            # Use shared cache from main.py (RECOMMENDED)
+            print("✅ Workflow engine using shared semantic cache")
+            self.orchestrator = CachedOrchestrator(base_orchestrator, cache)
+        else:
+            # Fallback: create own cache (will be isolated)
+            print("⚠️  Workflow engine creating isolated cache (not shared)")
+            workflow_cache = SemanticCache(
+                similarity_threshold=0.80,
+                max_cache_size=500,
+                ttl_hours=12
+            )
+            self.orchestrator = CachedOrchestrator(base_orchestrator, workflow_cache)
+        
         self.active_executions: Dict[str, WorkflowExecution] = {}
     
     async def execute_workflow(
@@ -122,7 +145,7 @@ class WorkflowEngine:
                 result = await self.orchestrator.run_reliable_workflow(
                     user_prompt=prompt,
                     confidence_threshold=confidence_threshold,
-                    response_schema=LoanStepDecision  # NEW: Use proper schema
+                    response_schema=LoanStepDecision
                 )
                 
                 if result["status"] == "success":
