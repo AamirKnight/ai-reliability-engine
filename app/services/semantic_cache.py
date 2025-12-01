@@ -1,13 +1,12 @@
-# app/services/semantic_cache.py
 
 import numpy as np
 import json
 import time
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-from sentence_transformers import SentenceTransformer
 from collections import deque
-
+from google import genai
+from app.core.config import settings
 
 class CacheEntry:
     """Represents a single cached result"""
@@ -22,13 +21,8 @@ class CacheEntry:
 
 class SemanticCache:
     """
-    Intelligent semantic caching using sentence embeddings.
-    Finds similar prompts even if wording is different.
-    
-    Example:
-        "Calculate DTI for applicant earning $80k with $20k debt"
-        matches
-        "What's the debt-to-income ratio for someone making 80000 annually with 20000 in debt"
+    Intelligent semantic caching using Google's Embedding API.
+    Stateless and memory-efficient (no local PyTorch required).
     """
     
     def __init__(
@@ -37,16 +31,10 @@ class SemanticCache:
         max_cache_size: int = 1000,
         ttl_hours: int = 24
     ):
-        """
-        Args:
-            similarity_threshold: Minimum cosine similarity to consider a cache hit (0-1)
-            max_cache_size: Maximum number of entries to store
-            ttl_hours: Time-to-live for cache entries in hours
-        """
-        print("🔄 Loading semantic embedding model (one-time setup)...")
-        # This model runs locally, ~80MB, very fast
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
-        print("✅ Embedding model loaded")
+        print("🔄 Initializing Semantic Cache (API-based)...")
+        # Use Google GenAI Client instead of local heavy models
+        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        self.embedding_model = "text-embedding-004"
         
         self.similarity_threshold = similarity_threshold
         self.max_cache_size = max_cache_size
@@ -61,12 +49,26 @@ class SemanticCache:
             "cache_hits": 0,
             "cache_misses": 0,
             "total_time_saved_seconds": 0.0,
-            "api_calls_saved": 0
+            "api_calls_saved": 0,
+            "embedding_errors": 0
         }
     
-    def _encode_prompt(self, prompt: str) -> np.ndarray:
-        """Convert prompt to embedding vector"""
-        return self.model.encode(prompt, convert_to_numpy=True)
+    def _encode_prompt(self, prompt: str) -> Optional[np.ndarray]:
+        """
+        Convert prompt to embedding vector using Google API.
+        Returns None if API fails (failsafe).
+        """
+        try:
+            result = self.client.models.embed_content(
+                model=self.embedding_model,
+                contents=prompt
+            )
+            # Access the first embedding and convert to numpy array
+            return np.array(result.embeddings[0].values)
+        except Exception as e:
+            print(f"⚠️ Embedding API Failed: {str(e)}")
+            self.stats["embedding_errors"] += 1
+            return None
     
     def _calculate_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
         """Cosine similarity between two embeddings"""
@@ -76,7 +78,6 @@ class SemanticCache:
     def _clean_expired_entries(self):
         """Remove entries older than TTL"""
         now = datetime.now()
-        # Filter out expired entries
         valid_entries = [
             entry for entry in self.cache 
             if (now - entry.created_at) < self.ttl
@@ -89,7 +90,6 @@ class SemanticCache:
         """
         self.stats["total_queries"] += 1
         
-        # Clean old entries periodically (every 100 queries)
         if self.stats["total_queries"] % 100 == 0:
             self._clean_expired_entries()
         
@@ -97,8 +97,13 @@ class SemanticCache:
             self.stats["cache_misses"] += 1
             return None
         
-        # Encode the query
+        # Encode the query (API Call)
         query_embedding = self._encode_prompt(prompt)
+        
+        # If embedding failed (e.g. network issue), treat as cache miss
+        if query_embedding is None:
+            self.stats["cache_misses"] += 1
+            return None
         
         # Find best match
         best_match: Optional[CacheEntry] = None
@@ -111,10 +116,9 @@ class SemanticCache:
                 best_similarity = similarity
                 best_match = entry
         
-        # --- 👇 NEW DEBUGGING LOGIC STARTS HERE 👇 ---
         if best_match:
-            # This prints EVERY check so you can see the score
-            print(f"🔎 Cache Check: Score {best_similarity:.3f} | Threshold {self.similarity_threshold}")
+            # Debug log
+            pass
 
         # Check if similarity exceeds threshold
         if best_match and best_similarity >= self.similarity_threshold:
@@ -136,13 +140,6 @@ class SemanticCache:
                 "time_saved_seconds": 2.5
             }
         
-        # If we found a match but it was too low, tell us why
-        if best_match and best_similarity > 0.5:
-             print(f"⚠️ NEAR MISS: Score {best_similarity:.3f} was below threshold {self.similarity_threshold}")
-             print(f"   Query: {prompt}")
-             print(f"   Match: {best_match.prompt}")
-        # --- 👆 NEW DEBUGGING LOGIC ENDS HERE 👆 ---
-
         # Cache miss
         self.stats["cache_misses"] += 1
         return None
@@ -150,14 +147,13 @@ class SemanticCache:
     def set(self, prompt: str, result: Dict[Any, Any], workflow_context: Optional[Dict] = None):
         """
         Store a new result in the cache.
-        
-        Args:
-            prompt: The prompt that generated this result
-            result: The result to cache
-            workflow_context: Optional context for future matching
         """
         # Encode the prompt
         embedding = self._encode_prompt(prompt)
+        
+        # If embedding failed, we just skip caching this item
+        if embedding is None:
+            return
         
         # Create cache entry
         entry = CacheEntry(
@@ -166,23 +162,20 @@ class SemanticCache:
             embedding=embedding
         )
         
-        # Add to cache (deque automatically handles max size)
         self.cache.append(entry)
     
     def invalidate(self, prompt: str = None):
         """
         Invalidate cache entries.
-        
-        Args:
-            prompt: If provided, remove entries similar to this prompt.
-                   If None, clear entire cache.
         """
         if prompt is None:
             self.cache.clear()
             return
         
         query_embedding = self._encode_prompt(prompt)
-        
+        if query_embedding is None:
+            return
+
         # Remove similar entries
         filtered = [
             entry for entry in self.cache
@@ -205,8 +198,8 @@ class SemanticCache:
             "cache_misses": self.stats["cache_misses"],
             "hit_rate": f"{hit_rate * 100:.1f}%",
             "api_calls_saved": self.stats["api_calls_saved"],
+            "embedding_errors": self.stats.get("embedding_errors", 0),
             "time_saved_seconds": f"{self.stats['total_time_saved_seconds']:.1f}s",
-            "estimated_cost_savings_usd": f"${self.stats['api_calls_saved'] * 0.00001:.4f}",
             "similarity_threshold": self.similarity_threshold
         }
     
@@ -249,29 +242,6 @@ class SemanticCache:
             json.dump(cache_data, f, indent=2)
         
         print(f"✅ Cache exported to {filepath}")
-    
-    def import_cache(self, filepath: str):
-        """Import cache from file"""
-        with open(filepath, 'r') as f:
-            cache_data = json.load(f)
-        
-        # Restore entries
-        self.cache.clear()
-        for entry_data in cache_data["entries"]:
-            entry = CacheEntry(
-                prompt=entry_data["prompt"],
-                result=entry_data["result"],
-                embedding=np.array(entry_data["embedding"])
-            )
-            entry.created_at = datetime.fromisoformat(entry_data["created_at"])
-            entry.hit_count = entry_data["hit_count"]
-            self.cache.append(entry)
-        
-        # Restore stats
-        self.stats = cache_data["stats"]
-        
-        print(f"✅ Cache imported from {filepath} ({len(self.cache)} entries)")
-
 
 # ============================================================================
 # INTEGRATION WRAPPER
@@ -286,7 +256,7 @@ class CachedOrchestrator:
     def __init__(self, orchestrator, cache: Optional[SemanticCache] = None):
         self.orchestrator = orchestrator
         self.cache = cache or SemanticCache(
-            similarity_threshold=0.90,
+            similarity_threshold=0.80, # Updated to match SemanticCache default
             max_cache_size=1000,
             ttl_hours=24
         )
